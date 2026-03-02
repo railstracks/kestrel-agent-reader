@@ -178,6 +178,86 @@ class AgentReaderTests(unittest.TestCase):
             "Synthesis for blocks two and three",
         )
 
+    def test_read_notes_prints_noted_chapters_and_meta_note(self) -> None:
+        (self.root / "literature" / "mortal-questions.json").write_text(
+            json.dumps(
+                [
+                    {"title": "What Is It Like to Be a Bat?", "content": "one"},
+                    {"title": "Brain Bisection", "content": "two"},
+                    {"title": "Panpsychism", "content": "three"},
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.root / "literature.json").write_text(
+            json.dumps(
+                {
+                    "books": {
+                        "mortal-questions.json": {
+                            "total_chapters": 3,
+                            "chapters": {
+                                "0": {"read": True, "notes": "Bat note"},
+                                "2": {"read": True, "notes": "Panpsychism note"},
+                            },
+                            "meta_note": "Synthesis note",
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_script("--read-notes", "mortal-questions.json")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("=== Notes for mortal-questions.json ===", result.stdout)
+        self.assertIn(
+            "--- Chapter 1: What Is It Like to Be a Bat? ---",
+            result.stdout,
+        )
+        self.assertIn("Bat note", result.stdout)
+        self.assertIn("--- Chapter 3: Panpsychism ---", result.stdout)
+        self.assertIn("Panpsychism note", result.stdout)
+        self.assertIn("--- Meta-note ---", result.stdout)
+        self.assertIn("Synthesis note", result.stdout)
+        self.assertNotIn("Brain Bisection", result.stdout)
+
+    def test_read_notes_reports_missing_book_without_creating_library(self) -> None:
+        (self.root / "literature" / "book.json").write_text(
+            json.dumps([{"title": "Only", "content": "text"}]),
+            encoding="utf-8",
+        )
+
+        result = self.run_script("--read-notes", "book.json")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "No notes found for book.json")
+        self.assertFalse((self.root / "literature.json").exists())
+
+    def test_read_notes_reports_tracked_book_with_no_notes(self) -> None:
+        (self.root / "literature.json").write_text(
+            json.dumps(
+                {
+                    "books": {
+                        "book.json": {
+                            "total_chapters": 1,
+                            "chapters": {"0": {"read": True}},
+                            "meta_note": None,
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_script("--read-notes", "book.json")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(
+            result.stdout.strip(),
+            "No notes recorded yet. Start reading with --read book.json",
+        )
+
     def test_write_note_requires_text(self) -> None:
         (self.root / "literature" / "dune.json").write_text(
             json.dumps([{"title": "Only", "content": "line 1"}]),
@@ -199,7 +279,7 @@ class AgentReaderTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 1)
-        self.assertIn("literature file not found: missing.txt", result.stderr)
+        self.assertIn("literature file not found: missing.json", result.stderr)
 
     def test_write_operations_fail_on_invalid_literature_json(self) -> None:
         (self.root / "literature" / "dune.json").write_text(

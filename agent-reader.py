@@ -55,10 +55,11 @@ def load_settings(root: Path) -> dict:
     return data
 
 
-def load_library(root: Path) -> dict:
+def load_library(root: Path, create_if_missing: bool = True) -> dict:
     path = root / "literature.json"
     if not path.exists():
-        atomic_write_json(path, DEFAULT_LIBRARY)
+        if create_if_missing:
+            atomic_write_json(path, DEFAULT_LIBRARY)
         return dict(DEFAULT_LIBRARY)
 
     try:
@@ -395,10 +396,72 @@ def write_meta_note(
     return 0
 
 
+def read_notes(root: Path, library: dict, filename: str) -> int:
+    books = library.get("books", {})
+    book = books.get(filename)
+    if not isinstance(book, dict):
+        print(f"No notes found for {filename}")
+        return 0
+
+    chapters_data = book.get("chapters", {})
+    noted_chapters: list[tuple[int, str]] = []
+    if isinstance(chapters_data, dict):
+        for key, chapter_data in chapters_data.items():
+            try:
+                chapter_index = int(key)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(chapter_data, dict):
+                continue
+            notes = chapter_data.get("notes")
+            if isinstance(notes, str) and notes.strip():
+                noted_chapters.append((chapter_index, notes))
+
+    noted_chapters.sort(key=lambda item: item[0])
+    meta_note = book.get("meta_note")
+    meta_note_text = meta_note if isinstance(meta_note, str) and meta_note.strip() else None
+
+    if not noted_chapters and meta_note_text is None:
+        print(f"No notes recorded yet. Start reading with --read {filename}")
+        return 0
+
+    chapter_titles: dict[int, str] = {}
+    file_path = root / "literature" / filename
+    if file_path.is_file():
+        try:
+            chapters = load_chapters(file_path)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        chapter_titles = {
+            index: chapter["title"]
+            for index, chapter in enumerate(chapters)
+        }
+
+    print(f"=== Notes for {filename} ===")
+    print()
+
+    for chapter_index, notes in noted_chapters:
+        title = chapter_titles.get(chapter_index)
+        if title:
+            print(f"--- Chapter {chapter_index + 1}: {title} ---")
+        else:
+            print(f"--- Chapter {chapter_index + 1} ---")
+        print(notes)
+        print()
+
+    if meta_note_text is not None:
+        print("--- Meta-note ---")
+        print(meta_note_text)
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Incremental literature reader for AI agents")
     parser.add_argument("--list-unread", action="store_true", help="List books with unread chapters")
     parser.add_argument("--read", metavar="FILENAME", help="Read the next unread or specified chapter")
+    parser.add_argument("--read-notes", metavar="FILENAME", help="Read saved notes for a book")
     parser.add_argument(
         "--write-note",
         nargs=2,
@@ -422,6 +485,7 @@ def main() -> int:
     selected_commands = [
         bool(args.list_unread),
         args.read is not None,
+        args.read_notes is not None,
         args.write_note is not None,
         args.write_meta_note is not None,
     ]
@@ -438,7 +502,7 @@ def main() -> int:
     root = Path(__file__).resolve().parent
     load_settings(root)
     try:
-        library = load_library(root)
+        library = load_library(root, create_if_missing=args.read_notes is None)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -447,6 +511,8 @@ def main() -> int:
         return list_unread(root, library)
     if args.read:
         return read_chapter(root, library, args.read, args.chapter)
+    if args.read_notes:
+        return read_notes(root, library, args.read_notes)
     if args.write_note:
         filename, chapter_index_raw = args.write_note
         try:
