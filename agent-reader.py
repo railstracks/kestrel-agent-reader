@@ -16,6 +16,7 @@ DEFAULT_LIBRARY = {"books": {}}
 
 
 def atomic_write_json(path: Path, data: dict) -> None:
+    json.loads(json.dumps(data))
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", dir=path.parent, delete=False
@@ -63,11 +64,23 @@ def load_settings(root: Path) -> dict:
 
 
 def load_library(root: Path) -> dict:
-    data = load_json_file(root / "literature.json", DEFAULT_LIBRARY)
+    path = root / "literature.json"
+    if not path.exists():
+        atomic_write_json(path, DEFAULT_LIBRARY)
+        return dict(DEFAULT_LIBRARY)
+
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("Error: invalid JSON in literature.json") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError("Error: invalid JSON in literature.json")
+
     books = data.get("books")
     if not isinstance(books, dict):
-        data = dict(DEFAULT_LIBRARY)
-        atomic_write_json(root / "literature.json", data)
+        raise ValueError("Error: invalid JSON in literature.json")
     return data
 
 
@@ -177,6 +190,24 @@ def resolve_block_index(book: dict, requested_block: int | None) -> int | None:
     return None
 
 
+def validate_block_index(book: dict, block_index: int, filename: str) -> str | None:
+    total_blocks = book.get("total_blocks", 0)
+    if not isinstance(block_index, int) or block_index < 0 or block_index >= total_blocks:
+        if total_blocks <= 0:
+            return f"Error: {filename} has no readable blocks"
+        return (
+            f"Error: invalid block_index {block_index} for {filename}; "
+            f"valid range is 0 to {total_blocks - 1}"
+        )
+    return None
+
+
+def validate_meta_note_index(meta_note_index: int) -> str | None:
+    if not isinstance(meta_note_index, int) or meta_note_index < 0:
+        return "Error: meta-note index must be a non-negative integer"
+    return None
+
+
 def print_read_output(
     file_path: Path, lines: list[str], book: dict, block_index: int, settings: dict
 ) -> None:
@@ -237,14 +268,108 @@ def read_block(
         print(f"Error: no unread blocks remain in {filename}", file=sys.stderr)
         return 1
 
-    if not isinstance(block_index, int) or block_index < 0 or block_index >= book["total_blocks"]:
-        print(
-            f"Error: invalid block number {block_index} for {filename}",
-            file=sys.stderr,
-        )
+    block_error = validate_block_index(book, block_index, filename)
+    if block_error is not None:
+        print(block_error, file=sys.stderr)
         return 1
 
     print_read_output(file_path, lines, book, block_index, settings)
+    return 0
+
+
+def write_note(
+    root: Path,
+    settings: dict,
+    library: dict,
+    filename: str,
+    block_index: int,
+    text: str | None,
+) -> int:
+    if text is None:
+        print("Error: --text is required for --write-note", file=sys.stderr)
+        return 1
+
+    file_path = root / "literature" / filename
+    if not file_path.is_file():
+        print(f"Error: literature file not found: {filename}", file=sys.stderr)
+        return 1
+
+    lines = read_lines(file_path)
+    book, changed = ensure_book_metadata(library, filename, lines, settings["block_size"])
+    block_error = validate_block_index(book, block_index, filename)
+    if block_error is not None:
+        print(block_error, file=sys.stderr)
+        return 1
+
+    blocks = book.setdefault("blocks", {})
+    block_key = str(block_index)
+    block_data = blocks.get(block_key)
+    if not isinstance(block_data, dict):
+        block_data = {}
+        blocks[block_key] = block_data
+        changed = True
+
+    if block_data.get("read") is not True:
+        block_data["read"] = True
+        changed = True
+    if block_data.get("notes") != text:
+        block_data["notes"] = text
+        changed = True
+
+    if changed:
+        save_library(root, library)
+
+    print(f"Notes saved for block {block_index} of {filename}")
+    return 0
+
+
+def write_meta_note(
+    root: Path,
+    settings: dict,
+    library: dict,
+    filename: str,
+    meta_note_index: int,
+    text: str | None,
+) -> int:
+    if text is None:
+        print("Error: --text is required for --write-meta-note", file=sys.stderr)
+        return 1
+
+    meta_note_error = validate_meta_note_index(meta_note_index)
+    if meta_note_error is not None:
+        print(meta_note_error, file=sys.stderr)
+        return 1
+
+    file_path = root / "literature" / filename
+    if not file_path.is_file():
+        print(f"Error: literature file not found: {filename}", file=sys.stderr)
+        return 1
+
+    lines = read_lines(file_path)
+    book, changed = ensure_book_metadata(library, filename, lines, settings["block_size"])
+    total_blocks = book.get("total_blocks", 0)
+    if total_blocks <= 0:
+        print(f"Error: {filename} has no readable blocks", file=sys.stderr)
+        return 1
+
+    meta_notes = book.setdefault("meta_notes", {})
+    meta_note_key = str(meta_note_index)
+    if meta_notes.get(meta_note_key) != text:
+        meta_notes[meta_note_key] = text
+        changed = True
+
+    if changed:
+        save_library(root, library)
+
+    first_block = meta_note_index * settings["metanote_frequency"]
+    last_block = min(
+        ((meta_note_index + 1) * settings["metanote_frequency"]) - 1,
+        total_blocks - 1,
+    )
+    print(
+        f"Meta-note {meta_note_index} saved for {filename} "
+        f"(covers blocks {first_block}-{last_block})"
+    )
     return 0
 
 
@@ -252,6 +377,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Incremental literature reader for AI agents")
     parser.add_argument("--list-unread", action="store_true", help="List books with unread blocks")
     parser.add_argument("--read", metavar="FILENAME", help="Read the next unread or specified block")
+    parser.add_argument(
+        "--write-note",
+        nargs=2,
+        metavar=("FILENAME", "BLOCK_INDEX"),
+        help="Write notes for a specific block",
+    )
+    parser.add_argument(
+        "--write-meta-note",
+        nargs=2,
+        metavar=("FILENAME", "META_NOTE_INDEX"),
+        help="Write a meta-note for a range of blocks",
+    )
+    parser.add_argument("--text", help="Text payload for note-writing commands")
     parser.add_argument("--block", type=int, help="0-indexed block number to read")
     return parser
 
@@ -260,23 +398,58 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    if not args.list_unread and not args.read:
+    selected_commands = [
+        bool(args.list_unread),
+        args.read is not None,
+        args.write_note is not None,
+        args.write_meta_note is not None,
+    ]
+    if sum(selected_commands) == 0:
         parser.print_help()
         return 1
 
-    if args.list_unread and args.read:
-        parser.error("choose either --list-unread or --read")
+    if sum(selected_commands) > 1:
+        parser.error("choose exactly one command")
 
     if args.block is not None and not args.read:
         parser.error("--block requires --read")
 
     root = Path(__file__).resolve().parent
     settings = load_settings(root)
-    library = load_library(root)
+    try:
+        library = load_library(root)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
     if args.list_unread:
         return list_unread(root, settings, library)
-    return read_block(root, settings, library, args.read, args.block)
+    if args.read:
+        return read_block(root, settings, library, args.read, args.block)
+    if args.write_note:
+        filename, block_index_raw = args.write_note
+        try:
+            block_index = int(block_index_raw)
+        except ValueError:
+            print(
+                f"Error: invalid block_index {block_index_raw}; expected integer",
+                file=sys.stderr,
+            )
+            return 1
+        return write_note(root, settings, library, filename, block_index, args.text)
+
+    filename, meta_note_index_raw = args.write_meta_note
+    try:
+        meta_note_index = int(meta_note_index_raw)
+    except ValueError:
+        print(
+            f"Error: invalid meta-note index {meta_note_index_raw}; expected integer",
+            file=sys.stderr,
+        )
+        return 1
+    return write_meta_note(
+        root, settings, library, filename, meta_note_index, args.text
+    )
 
 
 if __name__ == "__main__":
