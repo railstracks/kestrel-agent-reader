@@ -1,0 +1,22 @@
+# User-specific settings
+settings.json
+
+# Reading progress and notes (may contain personal insights)
+literature.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
