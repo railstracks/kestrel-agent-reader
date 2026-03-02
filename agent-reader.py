@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 import argparse
 import json
-import math
 import sys
 import tempfile
 from pathlib import Path
 
 
-DEFAULT_SETTINGS = {
-    "block_size": 200,
-    "metanote_frequency": 10,
-}
-
+DEFAULT_SETTINGS: dict = {}
 DEFAULT_LIBRARY = {"books": {}}
 
 
@@ -48,19 +43,16 @@ def load_json_file(path: Path, default_data: dict) -> dict:
 
 def load_settings(root: Path) -> dict:
     data = load_json_file(root / "settings.json", DEFAULT_SETTINGS)
-    block_size = data.get("block_size")
-    metanote_frequency = data.get("metanote_frequency")
-    if not isinstance(block_size, int) or block_size <= 0:
-        block_size = DEFAULT_SETTINGS["block_size"]
-    if not isinstance(metanote_frequency, int) or metanote_frequency <= 0:
-        metanote_frequency = DEFAULT_SETTINGS["metanote_frequency"]
-    normalized = {
-        "block_size": block_size,
-        "metanote_frequency": metanote_frequency,
-    }
-    if normalized != data:
-        atomic_write_json(root / "settings.json", normalized)
-    return normalized
+    if not isinstance(data, dict):
+        data = {}
+    changed = False
+    for key in ("block_size", "metanote_frequency"):
+        if key in data:
+            del data[key]
+            changed = True
+    if changed:
+        atomic_write_json(root / "settings.json", data)
+    return data
 
 
 def load_library(root: Path) -> dict:
@@ -88,24 +80,37 @@ def save_library(root: Path, library: dict) -> None:
     atomic_write_json(root / "literature.json", library)
 
 
-def read_lines(path: Path) -> list[str]:
-    with path.open("r", encoding="utf-8", newline=None) as handle:
-        return handle.read().splitlines()
+def load_chapters(file_path: Path) -> list[dict]:
+    try:
+        with file_path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"Error: invalid JSON in {file_path.name}; expected an array of chapters"
+        ) from exc
+
+    if not isinstance(data, list):
+        raise ValueError(
+            f"Error: {file_path.name} must be a JSON array of chapters"
+        )
+
+    for index, chapter in enumerate(data):
+        if not isinstance(chapter, dict):
+            raise ValueError(
+                f"Error: {file_path.name} chapter {index} must be an object"
+            )
+        title = chapter.get("title")
+        content = chapter.get("content")
+        if not isinstance(title, str) or not isinstance(content, str):
+            raise ValueError(
+                f"Error: {file_path.name} chapter {index} must have title/content strings"
+            )
+    return data
 
 
-def calculate_total_blocks(total_lines: int, block_size: int) -> int:
-    if total_lines == 0:
-        return 0
-    return math.ceil(total_lines / block_size)
-
-
-def ensure_book_metadata(
-    library: dict, filename: str, lines: list[str], block_size: int
-) -> tuple[dict, bool]:
+def ensure_book_metadata(library: dict, filename: str, total_chapters: int) -> tuple[dict, bool]:
     books = library.setdefault("books", {})
     book = books.get(filename)
-    total_lines = len(lines)
-    total_blocks = calculate_total_blocks(total_lines, block_size)
     changed = False
 
     if not isinstance(book, dict):
@@ -113,21 +118,44 @@ def ensure_book_metadata(
         books[filename] = book
         changed = True
 
-    if not isinstance(book.get("blocks"), dict):
-        book["blocks"] = {}
+    if "chapters" not in book and isinstance(book.get("blocks"), dict):
+        book["chapters"] = book["blocks"]
         changed = True
 
-    if not isinstance(book.get("meta_notes"), dict):
-        book["meta_notes"] = {}
+    if "meta_note" not in book and isinstance(book.get("meta_notes"), dict):
+        meta_note_value = None
+        meta_notes = book.get("meta_notes") or {}
+        if isinstance(meta_notes, dict) and meta_notes:
+            candidates: list[tuple[int, str]] = []
+            for key, value in meta_notes.items():
+                try:
+                    index = int(key)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(value, str):
+                    candidates.append((index, value))
+            if candidates:
+                meta_note_value = sorted(candidates)[-1][1]
+        book["meta_note"] = meta_note_value
         changed = True
 
-    if book.get("total_lines") != total_lines:
-        book["total_lines"] = total_lines
+    if not isinstance(book.get("chapters"), dict):
+        book["chapters"] = {}
         changed = True
 
-    if book.get("total_blocks") != total_blocks:
-        book["total_blocks"] = total_blocks
+    meta_note = book.get("meta_note")
+    if meta_note is not None and not isinstance(meta_note, str):
+        book["meta_note"] = None
         changed = True
+
+    if book.get("total_chapters") != total_chapters:
+        book["total_chapters"] = total_chapters
+        changed = True
+
+    for key in ("blocks", "meta_notes", "total_blocks", "total_lines"):
+        if key in book:
+            del book[key]
+            changed = True
 
     return book, changed
 
@@ -135,39 +163,46 @@ def ensure_book_metadata(
 def get_literature_files(root: Path) -> list[Path]:
     literature_dir = root / "literature"
     literature_dir.mkdir(exist_ok=True)
-    return sorted(path for path in literature_dir.iterdir() if path.is_file())
+    return sorted(
+        path for path in literature_dir.iterdir() if path.is_file() and path.suffix == ".json"
+    )
 
 
-def get_unread_blocks(book: dict) -> list[int]:
-    total_blocks = book.get("total_blocks", 0)
-    blocks = book.get("blocks", {})
+def get_unread_chapters(book: dict) -> list[int]:
+    total_chapters = book.get("total_chapters", 0)
+    chapters = book.get("chapters", {})
     unread = []
-    for index in range(total_blocks):
-        block_data = blocks.get(str(index), {})
-        if not isinstance(block_data, dict) or block_data.get("read") is not True:
+    for index in range(total_chapters):
+        chapter_data = chapters.get(str(index), {})
+        if not isinstance(chapter_data, dict) or chapter_data.get("read") is not True:
             unread.append(index)
     return unread
 
 
-def list_unread(root: Path, settings: dict, library: dict) -> int:
+def list_unread(root: Path, library: dict) -> int:
     lines_out = []
     changed = False
 
     for file_path in get_literature_files(root):
-        lines = read_lines(file_path)
+        try:
+            chapters = load_chapters(file_path)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+
         book, book_changed = ensure_book_metadata(
-            library, file_path.name, lines, settings["block_size"]
+            library, file_path.name, len(chapters)
         )
         changed = changed or book_changed
-        unread = get_unread_blocks(book)
+        unread = get_unread_chapters(book)
         if not unread:
             continue
-        total_blocks = book["total_blocks"]
-        if len(unread) == total_blocks:
-            detail = "all blocks"
+        total_chapters = book["total_chapters"]
+        if len(unread) == total_chapters:
+            detail = "all chapters"
         else:
-            detail = f"block {unread[0]}-{unread[-1]} of {total_blocks}"
-        label = "block" if len(unread) == 1 else "blocks"
+            detail = f"chapters {unread[0]}-{unread[-1]} of {total_chapters}"
+        label = "chapter" if len(unread) == 1 else "chapters"
         lines_out.append(
             f"{file_path.name}: {len(unread)} unread {label} ({detail})"
         )
@@ -181,108 +216,102 @@ def list_unread(root: Path, settings: dict, library: dict) -> int:
     return 1
 
 
-def resolve_block_index(book: dict, requested_block: int | None) -> int | None:
-    if requested_block is not None:
-        return requested_block
-    unread = get_unread_blocks(book)
+def resolve_chapter_index(book: dict, requested_chapter: int | None) -> int | None:
+    if requested_chapter is not None:
+        return requested_chapter
+    unread = get_unread_chapters(book)
     if unread:
         return unread[0]
     return None
 
 
-def validate_block_index(book: dict, block_index: int, filename: str) -> str | None:
-    total_blocks = book.get("total_blocks", 0)
-    if not isinstance(block_index, int) or block_index < 0 or block_index >= total_blocks:
-        if total_blocks <= 0:
-            return f"Error: {filename} has no readable blocks"
+def validate_chapter_index(book: dict, chapter_index: int, filename: str) -> str | None:
+    total_chapters = book.get("total_chapters", 0)
+    if not isinstance(chapter_index, int) or chapter_index < 0 or chapter_index >= total_chapters:
+        if total_chapters <= 0:
+            return f"Error: {filename} has no readable chapters"
         return (
-            f"Error: invalid block_index {block_index} for {filename}; "
-            f"valid range is 0 to {total_blocks - 1}"
+            f"Error: invalid chapter_index {chapter_index} for {filename}; "
+            f"valid range is 0 to {total_chapters - 1}"
         )
-    return None
-
-
-def validate_meta_note_index(meta_note_index: int) -> str | None:
-    if not isinstance(meta_note_index, int) or meta_note_index < 0:
-        return "Error: meta-note index must be a non-negative integer"
     return None
 
 
 def print_read_output(
-    file_path: Path, lines: list[str], book: dict, block_index: int, settings: dict
+    chapter: dict, book: dict, chapter_index: int
 ) -> None:
     previous_notes = None
-    if block_index > 0:
-        previous_block = book.get("blocks", {}).get(str(block_index - 1), {})
-        if isinstance(previous_block, dict):
-            notes = previous_block.get("notes")
+    if chapter_index > 0:
+        previous_chapter = book.get("chapters", {}).get(str(chapter_index - 1), {})
+        if isinstance(previous_chapter, dict):
+            notes = previous_chapter.get("notes")
             if isinstance(notes, str) and notes.strip():
                 previous_notes = notes
 
     if previous_notes is not None:
-        print(f"=== Previous Block Notes (Block {block_index - 1}) ===")
+        print(f"=== Previous Chapter Notes (Chapter {chapter_index - 1}) ===")
         print(previous_notes)
         print()
 
-    total_blocks = book["total_blocks"]
-    print(f"=== Block {block_index} of {total_blocks}: {file_path.name} ===")
+    title = chapter["title"]
+    content = chapter["content"]
+    total_chapters = book["total_chapters"]
+    print(f"=== Chapter {chapter_index}: {title} ===")
+    if content:
+        print(content)
 
-    start = block_index * settings["block_size"]
-    end = start + settings["block_size"]
-    block_lines = lines[start:end]
-    if block_lines:
-        print("\n".join(block_lines))
-
-    if total_blocks == 0:
+    if total_chapters == 0:
         return
 
-    is_last_block = block_index == total_blocks - 1
-    meta_due = ((block_index + 1) % settings["metanote_frequency"] == 0) or is_last_block
-    if meta_due:
+    is_last_chapter = chapter_index == total_chapters - 1
+    if is_last_chapter:
         print()
         print(
-            "[Meta-note due: this is block "
-            f"{block_index}, metanote_frequency is {settings['metanote_frequency']}]"
+            "[This is the final chapter. Write a meta-note synthesizing your understanding of the book.]"
         )
 
 
-def read_block(
-    root: Path, settings: dict, library: dict, filename: str, block_arg: int | None
+def read_chapter(
+    root: Path, library: dict, filename: str, chapter_arg: int | None
 ) -> int:
     file_path = root / "literature" / filename
     if not file_path.is_file():
         print(f"Error: literature file not found: {filename}", file=sys.stderr)
         return 1
 
-    lines = read_lines(file_path)
-    book, changed = ensure_book_metadata(library, filename, lines, settings["block_size"])
+    try:
+        chapters = load_chapters(file_path)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    book, changed = ensure_book_metadata(library, filename, len(chapters))
     if changed:
         save_library(root, library)
 
-    if book["total_blocks"] == 0:
-        print(f"Error: {filename} has no readable blocks", file=sys.stderr)
+    if book["total_chapters"] == 0:
+        print(f"Error: {filename} has no readable chapters", file=sys.stderr)
         return 1
 
-    block_index = resolve_block_index(book, block_arg)
-    if block_index is None:
-        print(f"Error: no unread blocks remain in {filename}", file=sys.stderr)
+    chapter_index = resolve_chapter_index(book, chapter_arg)
+    if chapter_index is None:
+        print(f"Error: no unread chapters remain in {filename}", file=sys.stderr)
         return 1
 
-    block_error = validate_block_index(book, block_index, filename)
-    if block_error is not None:
-        print(block_error, file=sys.stderr)
+    chapter_error = validate_chapter_index(book, chapter_index, filename)
+    if chapter_error is not None:
+        print(chapter_error, file=sys.stderr)
         return 1
 
-    print_read_output(file_path, lines, book, block_index, settings)
+    print_read_output(chapters[chapter_index], book, chapter_index)
     return 0
 
 
 def write_note(
     root: Path,
-    settings: dict,
     library: dict,
     filename: str,
-    block_index: int,
+    chapter_index: int,
     text: str | None,
 ) -> int:
     if text is None:
@@ -294,50 +323,48 @@ def write_note(
         print(f"Error: literature file not found: {filename}", file=sys.stderr)
         return 1
 
-    lines = read_lines(file_path)
-    book, changed = ensure_book_metadata(library, filename, lines, settings["block_size"])
-    block_error = validate_block_index(book, block_index, filename)
-    if block_error is not None:
-        print(block_error, file=sys.stderr)
+    try:
+        chapters = load_chapters(file_path)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
         return 1
 
-    blocks = book.setdefault("blocks", {})
-    block_key = str(block_index)
-    block_data = blocks.get(block_key)
-    if not isinstance(block_data, dict):
-        block_data = {}
-        blocks[block_key] = block_data
+    book, changed = ensure_book_metadata(library, filename, len(chapters))
+    chapter_error = validate_chapter_index(book, chapter_index, filename)
+    if chapter_error is not None:
+        print(chapter_error, file=sys.stderr)
+        return 1
+
+    chapters_data = book.setdefault("chapters", {})
+    chapter_key = str(chapter_index)
+    chapter_data = chapters_data.get(chapter_key)
+    if not isinstance(chapter_data, dict):
+        chapter_data = {}
+        chapters_data[chapter_key] = chapter_data
         changed = True
 
-    if block_data.get("read") is not True:
-        block_data["read"] = True
+    if chapter_data.get("read") is not True:
+        chapter_data["read"] = True
         changed = True
-    if block_data.get("notes") != text:
-        block_data["notes"] = text
+    if chapter_data.get("notes") != text:
+        chapter_data["notes"] = text
         changed = True
 
     if changed:
         save_library(root, library)
 
-    print(f"Notes saved for block {block_index} of {filename}")
+    print(f"Notes saved for chapter {chapter_index} of {filename}")
     return 0
 
 
 def write_meta_note(
     root: Path,
-    settings: dict,
     library: dict,
     filename: str,
-    meta_note_index: int,
     text: str | None,
 ) -> int:
     if text is None:
         print("Error: --text is required for --write-meta-note", file=sys.stderr)
-        return 1
-
-    meta_note_error = validate_meta_note_index(meta_note_index)
-    if meta_note_error is not None:
-        print(meta_note_error, file=sys.stderr)
         return 1
 
     file_path = root / "literature" / filename
@@ -345,52 +372,46 @@ def write_meta_note(
         print(f"Error: literature file not found: {filename}", file=sys.stderr)
         return 1
 
-    lines = read_lines(file_path)
-    book, changed = ensure_book_metadata(library, filename, lines, settings["block_size"])
-    total_blocks = book.get("total_blocks", 0)
-    if total_blocks <= 0:
-        print(f"Error: {filename} has no readable blocks", file=sys.stderr)
+    try:
+        chapters = load_chapters(file_path)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
         return 1
 
-    meta_notes = book.setdefault("meta_notes", {})
-    meta_note_key = str(meta_note_index)
-    if meta_notes.get(meta_note_key) != text:
-        meta_notes[meta_note_key] = text
+    book, changed = ensure_book_metadata(library, filename, len(chapters))
+    total_chapters = book.get("total_chapters", 0)
+    if total_chapters <= 0:
+        print(f"Error: {filename} has no readable chapters", file=sys.stderr)
+        return 1
+
+    if book.get("meta_note") != text:
+        book["meta_note"] = text
         changed = True
 
     if changed:
         save_library(root, library)
 
-    first_block = meta_note_index * settings["metanote_frequency"]
-    last_block = min(
-        ((meta_note_index + 1) * settings["metanote_frequency"]) - 1,
-        total_blocks - 1,
-    )
-    print(
-        f"Meta-note {meta_note_index} saved for {filename} "
-        f"(covers blocks {first_block}-{last_block})"
-    )
+    print(f"Meta-note saved for {filename}")
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Incremental literature reader for AI agents")
-    parser.add_argument("--list-unread", action="store_true", help="List books with unread blocks")
-    parser.add_argument("--read", metavar="FILENAME", help="Read the next unread or specified block")
+    parser.add_argument("--list-unread", action="store_true", help="List books with unread chapters")
+    parser.add_argument("--read", metavar="FILENAME", help="Read the next unread or specified chapter")
     parser.add_argument(
         "--write-note",
         nargs=2,
-        metavar=("FILENAME", "BLOCK_INDEX"),
-        help="Write notes for a specific block",
+        metavar=("FILENAME", "CHAPTER_INDEX"),
+        help="Write notes for a specific chapter",
     )
     parser.add_argument(
         "--write-meta-note",
-        nargs=2,
-        metavar=("FILENAME", "META_NOTE_INDEX"),
-        help="Write a meta-note for a range of blocks",
+        metavar="FILENAME",
+        help="Write a meta-note for the entire book",
     )
     parser.add_argument("--text", help="Text payload for note-writing commands")
-    parser.add_argument("--block", type=int, help="0-indexed block number to read")
+    parser.add_argument("--chapter", type=int, help="0-indexed chapter number to read")
     return parser
 
 
@@ -411,11 +432,11 @@ def main() -> int:
     if sum(selected_commands) > 1:
         parser.error("choose exactly one command")
 
-    if args.block is not None and not args.read:
-        parser.error("--block requires --read")
+    if args.chapter is not None and not args.read:
+        parser.error("--chapter requires --read")
 
     root = Path(__file__).resolve().parent
-    settings = load_settings(root)
+    load_settings(root)
     try:
         library = load_library(root)
     except ValueError as exc:
@@ -423,33 +444,23 @@ def main() -> int:
         return 1
 
     if args.list_unread:
-        return list_unread(root, settings, library)
+        return list_unread(root, library)
     if args.read:
-        return read_block(root, settings, library, args.read, args.block)
+        return read_chapter(root, library, args.read, args.chapter)
     if args.write_note:
-        filename, block_index_raw = args.write_note
+        filename, chapter_index_raw = args.write_note
         try:
-            block_index = int(block_index_raw)
+            chapter_index = int(chapter_index_raw)
         except ValueError:
             print(
-                f"Error: invalid block_index {block_index_raw}; expected integer",
+                f"Error: invalid chapter_index {chapter_index_raw}; expected integer",
                 file=sys.stderr,
             )
             return 1
-        return write_note(root, settings, library, filename, block_index, args.text)
+        return write_note(root, library, filename, chapter_index, args.text)
 
-    filename, meta_note_index_raw = args.write_meta_note
-    try:
-        meta_note_index = int(meta_note_index_raw)
-    except ValueError:
-        print(
-            f"Error: invalid meta-note index {meta_note_index_raw}; expected integer",
-            file=sys.stderr,
-        )
-        return 1
-    return write_meta_note(
-        root, settings, library, filename, meta_note_index, args.text
-    )
+    filename = args.write_meta_note
+    return write_meta_note(root, library, filename, args.text)
 
 
 if __name__ == "__main__":
