@@ -114,7 +114,95 @@ class AgentReaderTests(unittest.TestCase):
         result = self.run_script("--read", "book.txt", "--block", "9")
 
         self.assertEqual(result.returncode, 1)
-        self.assertIn("invalid block number 9", result.stderr)
+        self.assertIn("invalid block_index 9", result.stderr)
+
+    def test_write_note_persists_notes_and_marks_block_read(self) -> None:
+        (self.root / "settings.json").write_text(
+            json.dumps({"block_size": 2, "metanote_frequency": 10}),
+            encoding="utf-8",
+        )
+        (self.root / "literature" / "dune.txt").write_text(
+            "line 1\nline 2\nline 3\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_script(
+            "--write-note",
+            "dune.txt",
+            "1",
+            "--text",
+            "Block one notes",
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Notes saved for block 1 of dune.txt", result.stdout)
+
+        literature = json.loads((self.root / "literature.json").read_text(encoding="utf-8"))
+        self.assertEqual(literature["books"]["dune.txt"]["blocks"]["1"]["notes"], "Block one notes")
+        self.assertTrue(literature["books"]["dune.txt"]["blocks"]["1"]["read"])
+        self.assertEqual(literature["books"]["dune.txt"]["total_blocks"], 2)
+
+    def test_write_meta_note_persists_coverage_message(self) -> None:
+        (self.root / "settings.json").write_text(
+            json.dumps({"block_size": 2, "metanote_frequency": 2}),
+            encoding="utf-8",
+        )
+        (self.root / "literature" / "dune.txt").write_text(
+            "1\n2\n3\n4\n5\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_script(
+            "--write-meta-note",
+            "dune.txt",
+            "1",
+            "--text",
+            "Synthesis for blocks two and three",
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Meta-note 1 saved for dune.txt (covers blocks 2-2)", result.stdout)
+
+        literature = json.loads((self.root / "literature.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            literature["books"]["dune.txt"]["meta_notes"]["1"],
+            "Synthesis for blocks two and three",
+        )
+
+    def test_write_note_requires_text(self) -> None:
+        (self.root / "literature" / "dune.txt").write_text("line 1\n", encoding="utf-8")
+
+        result = self.run_script("--write-note", "dune.txt", "0")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("--text is required for --write-note", result.stderr)
+
+    def test_write_note_validates_missing_file(self) -> None:
+        result = self.run_script(
+            "--write-note",
+            "missing.txt",
+            "0",
+            "--text",
+            "notes",
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("literature file not found: missing.txt", result.stderr)
+
+    def test_write_operations_fail_on_invalid_literature_json(self) -> None:
+        (self.root / "literature" / "dune.txt").write_text("line 1\n", encoding="utf-8")
+        (self.root / "literature.json").write_text("{not json", encoding="utf-8")
+
+        result = self.run_script(
+            "--write-note",
+            "dune.txt",
+            "0",
+            "--text",
+            "notes",
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("invalid JSON in literature.json", result.stderr)
 
 
 if __name__ == "__main__":
