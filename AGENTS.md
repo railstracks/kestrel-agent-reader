@@ -10,10 +10,10 @@ The goal is to cultivate genuine understanding and personal insights that persis
 
 ## How It Works
 
-1. **Block-based reading**: Books are divided into configurable blocks (default 200 lines)
-2. **Per-block notes**: After reading each block, the agent writes notes capturing observations, questions, and insights
-3. **Meta-notes**: Every N blocks (configurable), the agent writes a synthesis — looking back across recent blocks to identify patterns, themes, and evolving understanding
-4. **Continuity**: Previous block notes are shown when reading the next block, maintaining context
+1. **Chapter-based reading**: Books are divided into explicit chapters in JSON files
+2. **Per-chapter notes**: After reading each chapter, the agent writes notes capturing observations, questions, and insights
+3. **Meta-notes**: One meta-note per book, written after the final chapter
+4. **Continuity**: Previous chapter notes are shown when reading the next chapter, maintaining context
 
 ## Structure
 
@@ -21,8 +21,8 @@ The goal is to cultivate genuine understanding and personal insights that persis
 kestrel-agent-reader/
 ├── agent-reader.py      # Main CLI script
 ├── literature/          # Directory containing book files
-├── literature.json      # Metadata: blocks read, notes, meta-notes (gitignored)
-├── settings.json        # Config: block_size, metanote_frequency (gitignored)
+├── literature.json      # Metadata: chapters read, notes, meta-note (gitignored)
+├── settings.json        # Reserved for future config (gitignored)
 ├── .gitignore
 └── AGENTS.md            # This file
 ```
@@ -30,42 +30,38 @@ kestrel-agent-reader/
 ## CLI Interface
 
 ```bash
-# List books with unread blocks
+# List books with unread chapters
 python agent-reader.py --list-unread
 
-# Read next unread block from a book
+# Read next unread chapter from a book
 python agent-reader.py --read <filename>
 
-# Read specific block
-python agent-reader.py --read <filename> --block <n>
+# Read specific chapter
+python agent-reader.py --read <filename> --chapter <n>
 
-# Write notes for a block
-python agent-reader.py --write-note <filename> <block_index> --text "Notes go here"
+# Write notes for a chapter
+python agent-reader.py --write-note <filename> <chapter_index> --text "Notes go here"
 
-# Write meta-note (triggered every N blocks or at book end)
-python agent-reader.py --write-meta-note <filename> <meta-note_index> --text "Synthesis..."
+# Write meta-note (one per book, after the final chapter)
+python agent-reader.py --write-meta-note <filename> --text "Synthesis..."
 ```
 
 ## Settings
 
-- `block_size`: Number of lines per block (default: 200)
-- `metanote_frequency`: Number of blocks between meta-notes (default: 10)
+- Reserved for future settings. File may be empty (`{}`).
 
 ## Notes Schema (literature.json)
 
 ```json
 {
   "books": {
-    "filename.txt": {
-      "total_blocks": 42,
-      "blocks": {
+    "filename.json": {
+      "total_chapters": 14,
+      "chapters": {
         "0": { "read": true, "notes": "..." },
         "1": { "read": true, "notes": "..." }
       },
-      "meta_notes": {
-        "0": "Synthesis of blocks 0-9...",
-        "1": "Synthesis of blocks 10-19..."
-      }
+      "meta_note": "Synthesis of the full book..."
     }
   }
 }
